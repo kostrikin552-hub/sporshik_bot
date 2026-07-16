@@ -1,0 +1,308 @@
+import os
+import time
+from datetime import datetime, timedelta
+
+from aiogram import Router, F, Bot
+from aiogram.filters import Command
+from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
+from aiogram.fsm.context import FSMContext
+
+from config import ADMIN_IDS
+from database import (
+    get_user, create_user, update_user,
+    create_case, get_case, update_case, get_user_cases,
+    add_case_file, get_case_files, create_payment, update_payment
+)
+from keyboards import main_menu, case_types, pay_plans
+from states import CaseStates
+from claims import generate_claim, get_checklist
+
+router = Router()
+
+async def finish_case(case_id: str, user_id: int, bot: Bot, state: FSMContext):
+    case = get_case(case_id)
+    if not case:
+        return
+
+    claim_text = generate_claim(case)
+    checklist = get_checklist()
+    deadline = (datetime.now() + timedelta(days=7)).isoformat()
+
+    update_case(case_id, {
+        "claim_text": claim_text,
+        "checklist": checklist,
+        "next_step": "Отправьте претензию в поддержку маркетплейса.",
+        "deadline": deadline,
+        "status": "completed"
+    })
+    update_user(user_id, {"active_case_id": None, "case_step": None})
+
+    await bot.send_message(
+        user_id,
+        f"✅ Претензия готова!\n\n"
+        f"📋 Кейс: {case_id}\n"
+        f"📅 Дедлайн: {datetime.now().strftime('%Y-%m-%d')}\n\n"
+        f"{claim_text}\n\n"
+        f"📌 Чек-лист:\n" + "\n".join(f"• {x}" for x in checklist) +
+        "\n\n⚠️ Бот не является юристом. Решение о подаче претензии принимаете вы."
+    )
+    await state.clear()
+
+@router.message(Command("start"))
+async def cmd_start(message: Message):
+    user = get_user(message.from_user.id)
+    if not user:
+        create_user(
+            message.from_user.id,
+            message.from_user.username or "",
+            message.from_user.first_name or ""
+        )
+    await message.answer(
+        f"👋 Привет, {message.from_user.first_name}!\n\n"
+        "Я — Спорщик. Помогаю селлерам Ozon и Wildberries оформлять споры.",
+        reply_markup=main_menu()
+    )
+
+@router.callback_query(F.data == "new_case")
+async def cb_new_case(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    tg_id = callback.from_user.id
+    user = get_user(tg_id)
+    if not user:
+        await callback.message.edit_text("Сначала /start")
+        return
+
+    if user.get("subscription") == "free":
+        cases = get_user_cases(tg_id)
+        if len(cases) >= 1:
+            await callback.message.edit_text("В бесплатной версии доступен 1 кейс. /pay")
+            return
+
+    case_id = f"case_{tg_id}_{int(time.time())}"
+    create_case({
+        "id": case_id,
+        "user_id": tg_id,
+        "type": None,
+        "order_number": None,
+        "description": None,
+        "status": "draft"
+    })
+    update_user(tg_id, {"active_case_id": case_id, "case_step": 1})
+    await state.update_data(case_id=case_id)
+
+    await callback.message.edit_text("Выберите тип проблемы:", reply_markup=case_types())
+
+@router.callback_query(F.data.startswith("type_"))
+async def cb_type(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    case_type = callback.data.replace("type_", "")
+    data = await state.get_data()
+    case_id = data.get("case_id")
+    if not case_id:
+        await callback.message.edit_text("Ошибка. Начните заново /new_case")
+        return
+    update_case(case_id, {"type": case_type})
+    update_user(callback.from_user.id, {"case_step": 2})
+    await callback.message.edit_text("Введите номер заказа:")
+    await state.set_state(CaseStates.waiting_order_number)
+
+@router.message(CaseStates.waiting_order_number, F.text)
+async def process_order(message: Message, state: FSMContext):
+    order = message.text.strip()
+    if not order.isdigit() or len(order) < 5:
+        await message.answer("Некорректный номер. Попробуйте ещё раз:")
+        return
+    data = await state.get_data()
+    case_id = data.get("case_id")
+    if not case_id:
+        await message.answer("Ошибка. Начните заново.")
+        return
+    update_case(case_id, {"order_number": order})
+    update_user(message.from_user.id, {"case_step": 3})
+    await message.answer("Опишите ситуацию кратко:")
+    await state.set_state(CaseStates.waiting_description)
+
+@router.message(CaseStates.waiting_description, F.text)
+async def process_description(message: Message, state: FSMContext):
+    desc = message.text.strip()
+    data = await state.get_data()
+    case_id = data.get("case_id")
+    if not case_id:
+        await message.answer("Ошибка. Начните заново.")
+        return
+    update_case(case_id, {"description": desc})
+    update_user(message.from_user.id, {"case_step": 4})
+    await message.answer(
+        "Загрузите фото (до 5 шт.). Отправляйте по одному. Когда закончите, /done_photos"
+    )
+    await state.set_state(CaseStates.waiting_photos)
+
+@router.message(CaseStates.waiting_photos, F.photo)
+async def process_photo(message: Message, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    case_id = data.get("case_id")
+    if not case_id:
+        await message.answer("Ошибка.")
+        return
+
+    files = get_case_files(case_id)
+    if len(files) >= 5:
+        await message.answer("Максимум 5 фото. Нажмите /done_photos")
+        return
+
+    file = await bot.get_file(message.photo[-1].file_id)
+    os.makedirs("temp", exist_ok=True)
+    file_path = f"temp/{case_id}_{int(time.time())}.jpg"
+    await bot.download_file(file.file_path, file_path)
+    add_case_file(case_id, "photo", file_path, message.photo[-1].file_id)
+
+    count = len(files) + 1
+    await message.answer(f"Фото {count}/5. Отправьте следующее или /done_photos")
+
+@router.message(CaseStates.waiting_photos, Command("done_photos"))
+async def done_photos(message: Message, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    case_id = data.get("case_id")
+    if not case_id:
+        await message.answer("Ошибка.")
+        return
+
+    files = get_case_files(case_id)
+    if not files:
+        await message.answer("Фото не загружены. Продолжить без фото? (да/нет)")
+        await state.set_state(CaseStates.waiting_no_photos_confirm)
+        return
+
+    await finish_case(case_id, message.from_user.id, bot, state)
+
+@router.message(CaseStates.waiting_no_photos_confirm, F.text.lower().in_(["да", "yes", "y"]))
+async def confirm_no_photos(message: Message, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    case_id = data.get("case_id")
+    if case_id:
+        await finish_case(case_id, message.from_user.id, bot, state)
+    else:
+        await state.clear()
+
+@router.message(CaseStates.waiting_no_photos_confirm)
+async def cancel_no_photos(message: Message, state: FSMContext):
+    await message.answer("Ок, продолжайте загрузку фото или /done_photos")
+    await state.set_state(CaseStates.waiting_photos)
+
+@router.callback_query(F.data == "my_cases")
+async def cb_my_cases(callback: CallbackQuery):
+    await callback.answer()
+    tg_id = callback.from_user.id
+    cases = get_user_cases(tg_id)
+    if not cases:
+        await callback.message.edit_text("Кейсов пока нет. /new_case")
+        return
+
+    user = get_user(tg_id)
+    if user.get("subscription") == "free":
+        case = cases[0]
+        await callback.message.edit_text(
+            f"Кейс: {case['id']}\nТип: {case.get('type', '—')}\nЗаказ: {case.get('order_number', '—')}\nСтатус: {case['status']}"
+        )
+    else:
+        for case in cases:
+            await callback.message.answer(
+                f"Кейс: {case['id']}\nТип: {case.get('type', '—')}\nЗаказ: {case.get('order_number', '—')}\nСтатус: {case['status']}"
+            )
+        await callback.message.delete()
+
+@router.callback_query(F.data == "pay")
+async def cb_pay(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.edit_text("Выберите тариф:", reply_markup=pay_plans())
+
+@router.callback_query(F.data.startswith("pay_"))
+async def cb_pay_plan(callback: CallbackQuery, bot: Bot):
+    await callback.answer()
+    plan = callback.data.replace("pay_", "")
+    tg_id = callback.from_user.id
+
+    star_prices = {
+        "once": 50,
+        "pro": 200,
+        "b2b": 1000
+    }
+    rub_prices = {
+        "once": 499,
+        "pro": 1990,
+        "b2b": 9900
+    }
+
+    star_amount = star_prices.get(plan, 50)
+    rub_amount = rub_prices.get(plan, 499)
+
+    create_payment(tg_id, plan, rub_amount, status="pending")
+
+    await bot.send_invoice(
+        chat_id=tg_id,
+        title=f"Тариф «{plan}»",
+        description=f"Доступ к тарифу «{plan}» в боте Спорщик\nЦена: {rub_amount} ₽ (~{star_amount} ⭐)",
+        payload=f"plan_{plan}_{tg_id}_{int(time.time())}",
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(label="Оплата тарифа", amount=star_amount)],
+        start_parameter="sporshik_payment"
+    )
+
+@router.pre_checkout_query()
+async def pre_checkout_query(pre_checkout_query: PreCheckoutQuery, bot: Bot):
+    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+@router.message(F.successful_payment)
+async def successful_payment(message: Message, bot: Bot):
+    payment = message.successful_payment
+    tg_id = message.from_user.id
+    payload = payment.invoice_payload
+    provider_payment_id = payment.provider_payment_charge_id
+
+    parts = payload.split("_")
+    if len(parts) >= 2:
+        plan = parts[1]
+    else:
+        plan = "unknown"
+
+    update_payment(provider_payment_id, {
+        "status": "paid",
+        "paid_at": datetime.now().isoformat()
+    })
+
+    if plan == "once":
+        user = get_user(tg_id)
+        current_balance = user.get("balance", 0)
+        new_balance = current_balance + 1
+        update_user(tg_id, {"balance": new_balance})
+        await message.answer("✅ Оплата прошла успешно! +1 платный кейс.")
+    elif plan in ("pro", "b2b"):
+        update_user(tg_id, {"subscription": plan})
+        await message.answer(f"✅ Оплата прошла успешно! Тариф «{plan}» активирован.")
+    else:
+        await message.answer("✅ Оплата прошла успешно!")
+
+@router.callback_query(F.data == "help")
+async def cb_help(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.edit_text(
+        "Справка:\n/start — меню\n/new_case — новый спор\n/my_cases — кейсы\n/pay — оплата\n\n"
+        "Бот не является юристом."
+    )
+
+@router.message(Command("admin"))
+async def cmd_admin(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Доступ запрещён")
+        return
+    from database import supabase
+    users = len(supabase.table("users").select("*").execute().data)
+    cases = len(supabase.table("cases").select("*").execute().data)
+    active = len([c for c in supabase.table("cases").select("*").execute().data if c["status"] == "draft"])
+    await message.answer(
+        f"👑 Админ-панель\n\n"
+        f"👥 Пользователей: {users}\n"
+        f"📋 Кейсов: {cases}\n"
+        f"⏳ Активных (draft): {active}"
+    )
