@@ -1,0 +1,7 @@
+from aiogram.fsm.state import StatesGroup, State
+
+class CaseStates(StatesGroup):
+    waiting_order_number = State()
+    waiting_description = State()
+    waiting_photos = State()
+    waiting_no_photos_confirm = State()
