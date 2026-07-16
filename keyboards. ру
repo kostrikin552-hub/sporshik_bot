@@ -1,0 +1,27 @@
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+def main_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🆕 Новый спор", callback_data="new_case")],
+        [InlineKeyboardButton(text="📂 Мои кейсы", callback_data="my_cases")],
+        [InlineKeyboardButton(text="💳 Оплата", callback_data="pay")],
+        [InlineKeyboardButton(text="❓ Помощь", callback_data="help")]
+    ])
+
+def case_types():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📦 Возврат", callback_data="type_return")],
+        [InlineKeyboardButton(text="🔄 Подмена", callback_data="type_substitution")],
+        [InlineKeyboardButton(text="🔧 Брак", callback_data="type_defect")],
+        [InlineKeyboardButton(text="❌ Невыкуп", callback_data="type_non_buyout")],
+        [InlineKeyboardButton(text="📦 Потеря", callback_data="type_loss")],
+        [InlineKeyboardButton(text="💥 Повреждение", callback_data="type_damage")],
+        [InlineKeyboardButton(text="⚖️ Спор с покупателем", callback_data="type_dispute")]
+    ])
+
+def pay_plans():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Разовая — 499 ₽", callback_data="pay_once")],
+        [InlineKeyboardButton(text="📦 PRO — 1 990 ₽/мес", callback_data="pay_pro")],
+        [InlineKeyboardButton(text="🏢 B2B — 9 900 ₽/мес", callback_data="pay_b2b")]
+    ])
