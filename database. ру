@@ -1,0 +1,67 @@
+from supabase import create_client
+from config import SUPABASE_URL, SUPABASE_KEY
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def get_user(telegram_id: int):
+    res = supabase.table("users").select("*").eq("telegram_id", telegram_id).execute()
+    return res.data[0] if res.data else None
+
+def create_user(telegram_id: int, username: str, first_name: str):
+    data = {
+        "telegram_id": telegram_id,
+        "username": username,
+        "first_name": first_name
+    }
+    res = supabase.table("users").insert(data).execute()
+    return res.data[0] if res.data else None
+
+def update_user(telegram_id: int, updates: dict):
+    res = supabase.table("users").update(updates).eq("telegram_id", telegram_id).execute()
+    return res.data[0] if res.data else None
+
+def create_case(case_data: dict):
+    res = supabase.table("cases").insert(case_data).execute()
+    return res.data[0] if res.data else None
+
+def get_case(case_id: str):
+    res = supabase.table("cases").select("*").eq("id", case_id).execute()
+    return res.data[0] if res.data else None
+
+def update_case(case_id: str, updates: dict):
+    res = supabase.table("cases").update(updates).eq("id", case_id).execute()
+    return res.data[0] if res.data else None
+
+def get_user_cases(telegram_id: int):
+    res = supabase.table("cases").select("*").eq("user_id", telegram_id).order("created_at", desc=True).execute()
+    return res.data or []
+
+def add_case_file(case_id: str, file_type: str, file_url: str, telegram_file_id: str = None):
+    data = {
+        "case_id": case_id,
+        "file_type": file_type,
+        "file_url": file_url,
+        "telegram_file_id": telegram_file_id
+    }
+    res = supabase.table("case_files").insert(data).execute()
+    return res.data[0] if res.data else None
+
+def get_case_files(case_id: str):
+    res = supabase.table("case_files").select("*").eq("case_id", case_id).order("created_at", desc=False).execute()
+    return res.data or []
+
+def create_payment(user_id: int, plan: str, amount: float, status: str = "pending", provider: str = None, provider_payment_id: str = None):
+    data = {
+        "user_id": user_id,
+        "plan": plan,
+        "amount": amount,
+        "status": status,
+        "provider": provider,
+        "provider_payment_id": provider_payment_id
+    }
+    res = supabase.table("payments").insert(data).execute()
+    return res.data[0] if res.data else None
+
+def update_payment(provider_payment_id: str, updates: dict):
+    res = supabase.table("payments").update(updates).eq("provider_payment_id", provider_payment_id).execute()
+    return res.data[0] if res.data else None
